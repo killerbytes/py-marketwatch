@@ -1,34 +1,30 @@
 """
-notifier.py — Sends HTML alert emails via Gmail SMTP over SSL.
+notifier.py — Sends HTML alert emails via Resend HTTP API.
 
-Why Gmail SMTP + App Password: Zero cost, no third-party service,
-works reliably from Railway without additional env vars or API keys beyond
-what the user already has.
+Why Resend API: Bypasses standard SMTP blocking (like on Railway).
 
-App Password setup: Google Account → Security → 2-Step Verification → App passwords.
+Resend setup: Go to resend.com, sign up, get an API key.
+You can send emails from onboarding@resend.dev to the email address you
+signed up with, without verifying a custom domain.
 """
 from __future__ import annotations
 
 import logging
-import smtplib
+import json
+import urllib.request
+import urllib.error
 from dataclasses import dataclass
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
 from threshold_engine import AlertEvent
 
 logger = logging.getLogger(__name__)
 
-_SMTP_HOST = "smtp.gmail.com"
-_SMTP_PORT = 465  # SSL
-
 
 @dataclass(frozen=True)
 class EmailConfig:
-    """Gmail SMTP credentials and recipient address."""
+    """Resend API credentials and recipient address."""
 
-    gmail_user: str
-    gmail_app_password: str
+    resend_api_key: str
     alert_email_to: str
 
 
@@ -110,17 +106,13 @@ def _build_html(events: list[AlertEvent]) -> str:
 
 def send_alert_email(cfg: EmailConfig, events: list[AlertEvent]) -> None:
     """
-    Sends a single HTML email summarising all triggered events.
+    Sends a single HTML email summarising all triggered events using the Resend API.
 
-    No-op if *events* is empty (guard against unnecessary SMTP connections).
+    No-op if *events* is empty.
 
     Args:
-        cfg:    Gmail SMTP credentials and recipient.
+        cfg:    Resend API credentials and recipient.
         events: Non-empty list of AlertEvent objects to include in the email.
-
-    Raises:
-        smtplib.SMTPAuthenticationError: If credentials are wrong.
-        smtplib.SMTPException:           For other SMTP failures.
     """
     if not events:
         logger.debug("No events — skipping email")
@@ -128,15 +120,33 @@ def send_alert_email(cfg: EmailConfig, events: list[AlertEvent]) -> None:
 
     tickers = ", ".join(e.ticker for e in events)
     subject = f"⚠️ MarketWatch: {len(events)} alert{'s' if len(events) != 1 else ''} — {tickers}"
+    html_content = _build_html(events)
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = cfg.gmail_user
-    msg["To"] = cfg.alert_email_to
-    msg.attach(MIMEText(_build_html(events), "html", "utf-8"))
-
-    logger.info("Sending alert email to=%s events=%s", cfg.alert_email_to, len(events))
-    with smtplib.SMTP_SSL(_SMTP_HOST, _SMTP_PORT) as server:
-        server.login(cfg.gmail_user, cfg.gmail_app_password)
-        server.send_message(msg)
-    logger.info("Email sent successfully subject=%s", subject)
+    logger.info("Sending alert email via Resend to=%s events=%s", cfg.alert_email_to, len(events))
+    
+    url = "https://api.resend.com/emails"
+    headers = {
+        "Authorization": f"Bearer {cfg.resend_api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    # Resend allows sending from onboarding@resend.dev to the registered email for testing.
+    data = {
+        "from": "MarketWatch <onboarding@resend.dev>",
+        "to": [cfg.alert_email_to],
+        "subject": subject,
+        "html": html_content
+    }
+    
+    req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers, method="POST")
+    
+    try:
+        with urllib.request.urlopen(req) as response:
+            logger.info("Email sent successfully via Resend subject=%s", subject)
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8")
+        logger.error("Failed to send email via Resend HTTP status=%s response=%s", e.code, error_body)
+        raise RuntimeError(f"Resend API error: {e.code} {error_body}") from e
+    except Exception as e:
+        logger.error("Failed to connect to Resend API error=%s", e)
+        raise

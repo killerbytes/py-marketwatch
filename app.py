@@ -5,7 +5,7 @@ Orchestrates: load config → fetch prices → evaluate thresholds → send aler
 Designed to run as a Railway Cron Job (schedule: 0 * * * *).
 
 Environment variables required (set in Railway dashboard):
-  GMAIL_USER, GMAIL_APP_PASSWORD, ALERT_EMAIL_TO
+  RESEND_API_KEY, ALERT_EMAIL_TO
   GOOGLE_SHEETS_ID, GOOGLE_CREDENTIALS_JSON
   STATE_FILE_PATH  (default: /data/state.json — Railway Volume mount)
 """
@@ -51,8 +51,7 @@ def _require_env(key: str) -> str:
 
 def _build_email_config() -> EmailConfig:
     return EmailConfig(
-        gmail_user=_require_env("GMAIL_USER"),
-        gmail_app_password=_require_env("GMAIL_APP_PASSWORD"),
+        resend_api_key=_require_env("RESEND_API_KEY"),
         alert_email_to=_require_env("ALERT_EMAIL_TO"),
     )
 
