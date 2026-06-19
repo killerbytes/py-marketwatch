@@ -127,7 +127,8 @@ def send_alert_email(cfg: EmailConfig, events: list[AlertEvent]) -> None:
     url = "https://api.resend.com/emails"
     headers = {
         "Authorization": f"Bearer {cfg.resend_api_key}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "User-Agent": "MarketWatch-Alert-Script/1.0"
     }
     
     # Resend allows sending from onboarding@resend.dev to the registered email for testing.
