@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
+import time
 from typing import Optional
 
 import gspread
@@ -59,9 +61,36 @@ def load_watchlist(sheets_id: str, credentials_json: str) -> list[ThresholdRule]
     creds = Credentials.from_service_account_info(creds_dict, scopes=_SCOPES)
     client = gspread.authorize(creds)
 
-    sheet = client.open_by_key(sheets_id)
-    ws = sheet.worksheet(_WATCHLIST_TAB)
-    rows = ws.get_all_records(numericise_ignore=["all"])  # Keep all values as strings
+    max_attempts = 5
+    base_delay = 1.0
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            sheet = client.open_by_key(sheets_id)
+            ws = sheet.worksheet(_WATCHLIST_TAB)
+            rows = ws.get_all_records(numericise_ignore=["all"])  # Keep all values as strings
+            break
+        except Exception as exc:
+            # Identify transient errors to retry (e.g., 503 Service Unavailable, 429 Rate Limit, 500/502/504, or network issues)
+            is_transient = (
+                (isinstance(exc, gspread.exceptions.APIError) and exc.code in (429, 500, 502, 503, 504))
+                or isinstance(exc, (ConnectionError, TimeoutError))
+            )
+            
+            if is_transient and attempt < max_attempts:
+                # Exponential backoff with random jitter to prevent thundering herd
+                delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
+                logger.warning(
+                    "Transient error loading watchlist, retrying in %.2fs (attempt %s/%s) — %s: %s",
+                    delay,
+                    attempt,
+                    max_attempts,
+                    type(exc).__name__,
+                    exc,
+                )
+                time.sleep(delay)
+            else:
+                raise
 
     if not rows:
         logger.warning("Watchlist tab is empty sheet_id=%s", sheets_id)

@@ -1,9 +1,11 @@
 """
-Tests for notifier.py — Gmail SMTP email dispatch.
-SMTP is fully mocked; no real email is sent during tests.
+Tests for notifier.py — Resend API email dispatch.
 """
 from __future__ import annotations
 
+import json
+import urllib.error
+from io import BytesIO
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,8 +21,7 @@ from threshold_engine import AlertEvent
 @pytest.fixture
 def cfg() -> EmailConfig:
     return EmailConfig(
-        gmail_user="sender@gmail.com",
-        gmail_app_password="test-app-password",
+        resend_api_key="re_testkey",
         alert_email_to="recipient@example.com",
     )
 
@@ -40,54 +41,64 @@ def _event(ticker: str = "VWRA.L", direction: str = "above", threshold: float = 
 # ---------------------------------------------------------------------------
 
 class TestSendAlertEmail:
-    def test_sends_email_via_smtp_ssl(self, cfg: EmailConfig):
+    def test_sends_email_via_resend(self, cfg: EmailConfig):
         events = [_event()]
-        with patch("notifier.smtplib.SMTP_SSL") as mock_smtp_cls:
-            mock_ctx = MagicMock()
-            mock_smtp_cls.return_value.__enter__.return_value = mock_ctx
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_response = MagicMock()
+            mock_urlopen.return_value.__enter__.return_value = mock_response
             send_alert_email(cfg, events)
-            mock_ctx.login.assert_called_once_with(cfg.gmail_user, cfg.gmail_app_password)
-            mock_ctx.send_message.assert_called_once()
+            mock_urlopen.assert_called_once()
+            
+            # verify request properties
+            req = mock_urlopen.call_args[0][0]
+            assert req.full_url == "https://api.resend.com/emails"
+            assert req.headers["Authorization"] == "Bearer re_testkey"
+            assert req.headers["Content-type"] == "application/json"
+            
+            # verify payload structure
+            data = json.loads(req.data.decode("utf-8"))
+            assert data["to"] == ["recipient@example.com"]
+            assert "MarketWatch" in data["from"]
+            assert "VWRA.L" in data["subject"]
 
     def test_email_subject_contains_ticker(self, cfg: EmailConfig):
         events = [_event(ticker="VWRA.L", direction="above")]
-        with patch("notifier.smtplib.SMTP_SSL") as mock_smtp_cls:
-            mock_ctx = MagicMock()
-            mock_smtp_cls.return_value.__enter__.return_value = mock_ctx
+        with patch("urllib.request.urlopen") as mock_urlopen:
             send_alert_email(cfg, events)
-            msg = mock_ctx.send_message.call_args[0][0]
-            assert "VWRA.L" in msg["Subject"]
+            req = mock_urlopen.call_args[0][0]
+            data = json.loads(req.data.decode("utf-8"))
+            assert "VWRA.L" in data["subject"]
 
     def test_email_contains_all_events(self, cfg: EmailConfig):
         events = [
             _event("VWRA.L", "above", 100.0, 101.5),
             _event("^GSPC", "below", 4500.0, 4400.0),
         ]
-        with patch("notifier.smtplib.SMTP_SSL") as mock_smtp_cls:
-            mock_ctx = MagicMock()
-            mock_smtp_cls.return_value.__enter__.return_value = mock_ctx
+        with patch("urllib.request.urlopen") as mock_urlopen:
             send_alert_email(cfg, events)
-            msg = mock_ctx.send_message.call_args[0][0]
-            body = msg.get_payload()
-            # Find the HTML part
-            html_content = ""
-            if isinstance(body, list):
-                for part in body:
-                    if part.get_content_type() == "text/html":
-                        html_content = part.get_payload(decode=True).decode()
-            else:
-                html_content = body
+            req = mock_urlopen.call_args[0][0]
+            data = json.loads(req.data.decode("utf-8"))
+            html_content = data["html"]
             assert "VWRA.L" in html_content
             assert "^GSPC" in html_content
 
-    def test_raises_on_smtp_auth_failure(self, cfg: EmailConfig):
-        import smtplib
-        with patch("notifier.smtplib.SMTP_SSL") as mock_smtp_cls:
-            mock_smtp_cls.side_effect = smtplib.SMTPAuthenticationError(535, b"Bad credentials")
-            with pytest.raises(smtplib.SMTPAuthenticationError):
+    def test_raises_on_resend_api_failure(self, cfg: EmailConfig):
+        fp = BytesIO(b"Unauthorized API Key")
+        err = urllib.error.HTTPError(
+            url="https://api.resend.com/emails",
+            code=401,
+            msg="Unauthorized",
+            hdrs=None,
+            fp=fp
+        )
+        
+        with patch("urllib.request.urlopen", side_effect=err):
+            with pytest.raises(RuntimeError) as exc_info:
                 send_alert_email(cfg, [_event()])
+            assert "Resend API error: 401 Unauthorized API Key" in str(exc_info.value)
 
     def test_does_not_send_when_events_list_empty(self, cfg: EmailConfig):
-        with patch("notifier.smtplib.SMTP_SSL") as mock_smtp_cls:
+        with patch("urllib.request.urlopen") as mock_urlopen:
             send_alert_email(cfg, [])
-            mock_smtp_cls.assert_not_called()
+            mock_urlopen.assert_not_called()
+
